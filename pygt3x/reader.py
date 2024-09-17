@@ -32,13 +32,16 @@ class FileReader:
         Input file name
     """
 
-    def __init__(self, file_name: str, num_rows: Optional[int] = None):
+    def __init__(self, file_name: str, chunk_size: Optional[int] = None,
+                 chunk_event: Optional[str] = None):
         """Initialise."""
         self.file_name = file_name
         self.acceleration = np.empty((0, 4))
         self.temperature = np.empty((0, 3))
         self.idle_sleep_mode_activated = None
-        self.num_rows = num_rows
+        self.chunk_size = chunk_size
+        self.chunk_event = chunk_event
+        self.event_cursor = 0
         self.nhanes = None
 
     def __enter__(self):
@@ -57,7 +60,7 @@ class FileReader:
         self.info = Info.read_zip(self.zipfile)
         self.calibration = self.read_json("calibration.json")
         self.temperature_calibration = self.read_json("temperature_calibration.json")
-        self._get_data(self.num_rows)
+        # self._get_data(self.num_rows)
         return self
 
     def __exit__(self, typ, value, traceback):
@@ -100,6 +103,32 @@ class FileReader:
             logger.warning("Unexpected payload shape %s", shape)
         return payload
 
+    # # New Chunking Methods
+    # -----------------------------------------------------|
+    def get_data(self):
+        """Public handler for _get_data method.
+
+        Since I took this call out of __enter__ it now needs to be called
+        explicitly within context manager in order for data to load as before.
+        """
+        self._get_data()
+
+    def get_chunk(self):
+        """Return a chunk of data and update the current reader position."""
+        self._get_data(num_rows=self.chunk_size)
+        accel = self.to_pandas()
+        temp = self.temperature_to_pandas()
+        self.flush_data()
+
+        return accel, temp
+
+    def flush_data(self):
+        """Flush data attributes after returning chunk."""
+        self.acceleration = np.empty((0, 4))
+        self.temperature = np.empty((0, 3))
+
+    # # Existing Data Read Methods
+    # -----------------------------------------------------|
     def read_events(self, num_rows=None):
         """Read events from file.
 
@@ -114,9 +143,15 @@ class FileReader:
                 yield raw_event
                 raw_event = self.logreader.read_event()
         else:
-            for _ in range(0, num_rows):
+            n_valid_events = 0
+            while n_valid_events < num_rows:
                 raw_event = self.logreader.read_event()
-                yield raw_event
+                if raw_event is not None:
+                    self.event_cursor += 1
+                    event_type = raw_event.header.event_type
+                    if event_type == Types[self.chunk_event].value:
+                        n_valid_events += 1
+                    yield raw_event
 
     def _get_data_nhanes(self):
         """Yield NHANES acceleration data."""

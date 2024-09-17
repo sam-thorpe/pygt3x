@@ -27,7 +27,7 @@ class Header:
 
     separator: bytes
     timestamp: int
-    event_types: bytes
+    event_type: bytes
     payload_size: int
 
     def __init__(self, header_bytes: bytes):
