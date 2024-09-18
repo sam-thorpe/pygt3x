@@ -21,6 +21,11 @@ from pygt3x.calibration import CalibrationV2Service
 from pygt3x.components import Header, Info, RawEvent
 
 logger = logging.getLogger(__name__)
+payload_readers = {
+    Types.Activity.value: read_activity1_payload,
+    Types.Activity2.value: read_activity2_payload,
+    Types.Activity3.value: read_activity3_payload
+}
 
 
 class FileReader:
@@ -32,16 +37,16 @@ class FileReader:
         Input file name
     """
 
-    def __init__(self, file_name: str, chunk_size: Optional[int] = None,
+    def __init__(self, file_name: str, gap_size: Optional[int] = None,
                  chunk_event: Optional[str] = None):
         """Initialise."""
         self.file_name = file_name
         self.acceleration = np.empty((0, 4))
         self.temperature = np.empty((0, 3))
         self.idle_sleep_mode_activated = None
-        self.chunk_size = chunk_size
+        self.gap_size = gap_size
         self.chunk_event = chunk_event
-        self.event_cursor = 0
+        self.last_chunk_event = None
         self.nhanes = None
 
     def __enter__(self):
@@ -60,7 +65,11 @@ class FileReader:
         self.info = Info.read_zip(self.zipfile)
         self.calibration = self.read_json("calibration.json")
         self.temperature_calibration = self.read_json("temperature_calibration.json")
-        # self._get_data(self.num_rows)
+
+        # load data on __enter__ if not gap splitting
+        if self.gap_size is None:
+            self._get_data()
+
         return self
 
     def __exit__(self, typ, value, traceback):
@@ -105,53 +114,66 @@ class FileReader:
 
     # # New Chunking Methods
     # -----------------------------------------------------|
-    def get_data(self):
-        """Public handler for _get_data method.
-
-        Since I took this call out of __enter__ it now needs to be called
-        explicitly within context manager in order for data to load as before.
-        """
-        self._get_data()
-
     def get_chunk(self):
         """Return a chunk of data and update the current reader position."""
-        self._get_data(num_rows=self.chunk_size)
+        self._get_data()
         accel = self.to_pandas()
-        temp = self.temperature_to_pandas()
         self.flush_data()
 
-        return accel, temp
+        if accel.empty:
+            return None
+        return accel
 
     def flush_data(self):
-        """Flush data attributes after returning chunk."""
-        self.acceleration = np.empty((0, 4))
+        """Flush data attributes after returning chunk.
+
+        Important: the last detected raw_event matching the chunk type must be
+                   appended to the start of the new acceleration time series
+                   or else it would be lost.
+        """
         self.temperature = np.empty((0, 3))
 
-    # # Existing Data Read Methods
-    # -----------------------------------------------------|
-    def read_events(self, num_rows=None):
-        """Read events from file.
+        # init new acceleration vector with last detected raw_event
+        event_type = self.last_chunk_event.header.event_type
+        if event_type in [Types.Activity.value, Types.Activity3.value]:
+            if self.last_chunk_event.header.payload_size == 1:
+                self.acceleration = np.empty((0, 4))
+            else:
+                payload = payload_readers[event_type](
+                    self.last_chunk_event.payload,
+                    self.last_chunk_event.header.timestamp,
+                    self.info.sample_rate)
+                self.acceleration = self._validate_payload(payload)
 
-        Parameters:
-        -----------
-        num_rows
-            Number of events to read.
-        """
-        if num_rows is None:
+    # # Updated Data Read Methods
+    # -----------------------------------------------------|
+    def read_events(self):
+        """Read events from file."""
+        if self.gap_size is None:
             raw_event = self.logreader.read_event()
             while raw_event is not None:
                 yield raw_event
                 raw_event = self.logreader.read_event()
         else:
-            n_valid_events = 0
-            while n_valid_events < num_rows:
+            raw_event = self.logreader.read_event()
+            while raw_event is not None:
+                event_type = raw_event.header.event_type
+                if event_type == Types[self.chunk_event].value:
+                    event_gap = self._get_event_gap(raw_event)
+                    self.last_chunk_event = raw_event
+                    if event_gap >= self.gap_size:
+                        break
+                yield raw_event
                 raw_event = self.logreader.read_event()
-                if raw_event is not None:
-                    self.event_cursor += 1
-                    event_type = raw_event.header.event_type
-                    if event_type == Types[self.chunk_event].value:
-                        n_valid_events += 1
-                    yield raw_event
+
+    def _get_event_gap(self, raw_event):
+        """Return timestamp gap between current and last event."""
+        if self.last_chunk_event is None:
+            return 0
+
+        current_event_time = raw_event.header.timestamp
+        last_event_time = self.last_chunk_event.header.timestamp
+        return current_event_time - last_event_time
 
     def _get_data_nhanes(self):
         """Yield NHANES acceleration data."""
@@ -162,14 +184,8 @@ class FileReader:
         )
         return [payload], []
 
-    def _get_data_default(self, num_rows=None):
-        """Yield acceleration data.
-
-        Parameters:
-        -----------
-        num_rows
-            Number of events to read.
-        """
+    def _get_data_default(self):
+        """Yield acceleration data."""
         acceleration = []
         temperature = []
         idle_sleep_mode_started = None
@@ -178,7 +194,7 @@ class FileReader:
         last_idsm_ts = 0
         # Initialize evt in case there are no events in the GT3x file
         evt = None
-        for evt in self.read_events(num_rows):
+        for evt in self.read_events():
 
             if not evt.is_checksum_valid:
                 logger.warning(
@@ -325,20 +341,19 @@ class FileReader:
             acceleration.extend(payload)
         if evt is not None:
             logger.debug("last ts %s", evt.header.timestamp)
+
         return acceleration, temperature
 
-    def _get_data(self, num_rows=None):
-        """Yield acceleration data.
-
-        Parameters:
-        -----------
-        num_rows
-            Number of events to read.
-        """
+    def _get_data(self):
+        """Yield acceleration data."""
         if not self.logreader:
             acceleration, temperature = self._get_data_nhanes()
         else:
-            acceleration, temperature = self._get_data_default(num_rows=num_rows)
+            acceleration, temperature = self._get_data_default()
+
+        # Insert the initial raw_event if applicable
+        if len(self.acceleration):
+            acceleration.insert(0, self.acceleration)
 
         # Check for and remove identical samples
         if len(acceleration) > 1:
