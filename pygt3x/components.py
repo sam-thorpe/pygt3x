@@ -99,7 +99,7 @@ class Info:
     mass: Optional[str]
     race: Optional[str]
     sample_rate: int
-    serial_numer: Optional[str]
+    serial_number: Optional[str]
     sex: Optional[str]
     side: Optional[str]
     start_date: int
