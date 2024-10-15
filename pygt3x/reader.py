@@ -201,7 +201,6 @@ class FileReader:
                 event_gap = self._get_event_gap(raw_event)
                 event_date = self._get_event_date(raw_event)
                 self.last_chunk_event = raw_event
-                # if event_gap >= self.gap_size:
                 if self._check_split_chunk(raw_event, event_gap, event_date):
                     self.last_chunk_date = event_date
                     self.chunk_dates.append(event_date)
