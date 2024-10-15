@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Optional
 from zipfile import ZipFile
 
+from datetime import datetime, date, timezone, timedelta
 import numpy as np
 import pandas as pd
 
@@ -38,7 +39,8 @@ class FileReader:
     """
 
     def __init__(self, file_name: str, gap_size: Optional[int] = None,
-                 chunk_event: Optional[str] = None):
+                 chunk_event: Optional[str] = None,
+                 chunk_by_day: Optional[bool] = False):
         """Initialise."""
         self.file_name = file_name
         self.acceleration = np.empty((0, 4))
@@ -46,7 +48,11 @@ class FileReader:
         self.idle_sleep_mode_activated = None
         self.gap_size = gap_size
         self.chunk_event = chunk_event
+        self.chunk_by_day = chunk_by_day
         self.last_chunk_event = None
+        self.last_chunk_date = None
+        self.chunk_dates = []
+        self.timezone = None
         self.nhanes = None
 
     def __enter__(self):
@@ -63,6 +69,7 @@ class FileReader:
             self.activity_file = self.zipfile.open("activity.bin", "r")
             self.nhanes = True
         self.info = Info.read_zip(self.zipfile)
+        self.timezone = self._parse_timezone()
         self.calibration = self.read_json("calibration.json")
         self.temperature_calibration = self.read_json("temperature_calibration.json")
 
@@ -71,6 +78,13 @@ class FileReader:
             self._get_data()
 
         return self
+
+    def _parse_timezone(self, offset_str=['hours', 'minutes', 'seconds']):
+        """Return the timezone as datetime object."""
+        offset_zip = zip(offset_str, self.info.timezone.split(':'))
+        offset_dct = {k: int(v) for k, v in offset_zip}
+
+        return timezone(timedelta(**offset_dct))
 
     def __exit__(self, typ, value, traceback):
         """Close file descriptors."""
@@ -150,21 +164,50 @@ class FileReader:
     def read_events(self):
         """Read events from file."""
         if self.gap_size is None:
-            raw_event = self.logreader.read_event()
-            while raw_event is not None:
-                yield raw_event
-                raw_event = self.logreader.read_event()
+            return self._read_events_full()
+        elif self.gap_size and self.chunk_by_day is False:
+            return self._read_events_gap_chunk()
+        elif self.gap_size and self.chunk_by_day:
+            return self._read_events_gap_day_chunk()
         else:
+            raise NotImplementedError('Ambiguous chunking strategy specified')
+
+    def _read_events_full(self):
+        """Read the full set of events."""
+        raw_event = self.logreader.read_event()
+        while raw_event is not None:
+            yield raw_event
             raw_event = self.logreader.read_event()
-            while raw_event is not None:
-                event_type = raw_event.header.event_type
-                if event_type == Types[self.chunk_event].value:
-                    event_gap = self._get_event_gap(raw_event)
-                    self.last_chunk_event = raw_event
-                    if event_gap >= self.gap_size:
-                        break
-                yield raw_event
-                raw_event = self.logreader.read_event()
+
+    def _read_events_gap_chunk(self):
+        """Read in chunk determined by specified gap boundary."""
+        raw_event = self.logreader.read_event()
+        while raw_event is not None:
+            event_type = raw_event.header.event_type
+            if event_type == Types[self.chunk_event].value:
+                event_gap = self._get_event_gap(raw_event)
+                self.last_chunk_event = raw_event
+                if event_gap >= self.gap_size:
+                    break
+            yield raw_event
+            raw_event = self.logreader.read_event()
+
+    def _read_events_gap_day_chunk(self):
+        """Read in chunk determined by either gap or day boundaries."""
+        raw_event = self.logreader.read_event()
+        while raw_event is not None:
+            event_type = raw_event.header.event_type
+            if event_type == Types[self.chunk_event].value:
+                event_gap = self._get_event_gap(raw_event)
+                event_date = self._get_event_date(raw_event)
+                self.last_chunk_event = raw_event
+                # if event_gap >= self.gap_size:
+                if self._check_split_chunk(raw_event, event_gap, event_date):
+                    self.last_chunk_date = event_date
+                    self.chunk_dates.append(event_date)
+                    break
+            yield raw_event
+            raw_event = self.logreader.read_event()
 
     def _get_event_gap(self, raw_event):
         """Return timestamp gap between current and last event."""
@@ -174,6 +217,23 @@ class FileReader:
         current_event_time = raw_event.header.timestamp
         last_event_time = self.last_chunk_event.header.timestamp
         return current_event_time - last_event_time
+
+    def _get_event_date(self, raw_event):
+        """Get date of event in subject local time."""
+        dt = datetime.fromtimestamp(
+            raw_event.header.timestamp,
+            tz=self.timezone)
+
+        return dt.date()
+
+    def _check_split_chunk(self, raw_event, event_gap, event_date):
+        """Return True if gap is large or date has changed."""
+        if self.last_chunk_date is None:
+            self.last_chunk_date = event_date
+            self.chunk_dates.append(event_date)
+            return False
+        elif event_gap >= self.gap_size or event_date > self.last_chunk_date:
+            return True
 
     def _get_data_nhanes(self):
         """Yield NHANES acceleration data."""
