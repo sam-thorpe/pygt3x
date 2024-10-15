@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Optional
 from zipfile import ZipFile
 
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 
