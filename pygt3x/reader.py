@@ -132,10 +132,10 @@ class FileReader:
         """Return a chunk of data and update the current reader position."""
         self._get_data()
         accel = self.to_pandas()
-        self.flush_data()
-
         if accel.empty:
             return None
+
+        self.flush_data()
         return accel
 
     def flush_data(self):
