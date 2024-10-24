@@ -148,16 +148,24 @@ class FileReader:
         self.temperature = np.empty((0, 3))
 
         # init new acceleration vector with last detected raw_event
-        event_type = self.last_chunk_event.header.event_type
-        if event_type in [Types.Activity.value, Types.Activity3.value]:
-            if self.last_chunk_event.header.payload_size == 1:
-                self.acceleration = np.empty((0, 4))
-            else:
+        self.acceleration = np.empty((0, 4))
+        if self.last_chunk_event:
+            event_type = self.last_chunk_event.header.event_type
+            if self._last_chunk_event_is_valid(event_type):
                 payload = payload_readers[event_type](
                     self.last_chunk_event.payload,
                     self.last_chunk_event.header.timestamp,
                     self.info.sample_rate)
                 self.acceleration = self._validate_payload(payload)
+
+    def _last_chunk_event_is_valid(self, event_type):
+        """Return True if last chunk event is valid."""
+        if self.last_chunk_event.is_checksum_valid:
+            if event_type in [Types.Activity.value, Types.Activity3.value]:
+                if self.last_chunk_event.header.payload_size != 1:
+                    return True
+            elif event_type == Types.Activity2.value:
+                return True
 
     # # Updated Data Read Methods
     # -----------------------------------------------------|
@@ -409,6 +417,10 @@ class FileReader:
             acceleration, temperature = self._get_data_nhanes()
         else:
             acceleration, temperature = self._get_data_default()
+
+        # Check if new acceleration data has ended
+        if len(acceleration) == 0:
+            self.last_chunk_event = None
 
         # Insert the initial raw_event if applicable
         if len(self.acceleration):
