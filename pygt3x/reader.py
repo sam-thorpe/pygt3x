@@ -54,6 +54,7 @@ class FileReader:
         self.chunk_dates = []
         self.timezone = None
         self.nhanes = None
+        self.chunk_index = 0
 
     def __enter__(self):
         """Open zipped file and ret up readers."""
@@ -135,7 +136,14 @@ class FileReader:
         if accel.empty:
             return None
 
+        self.chunk_index += 1
         self.flush_data()
+
+        # deduplicate final ism fill packet if necessary
+        ism_dups = accel[accel.index.isin(self.acceleration[:, 0])]
+        if not ism_dups.empty:
+            self.acceleration = np.empty((0, 4))
+
         return accel
 
     def flush_data(self):
@@ -191,8 +199,7 @@ class FileReader:
         """Read in chunk determined by specified gap boundary."""
         raw_event = self.logreader.read_event()
         while raw_event is not None:
-            event_type = raw_event.header.event_type
-            if event_type == Types[self.chunk_event].value:
+            if self._is_valid_chunk_event(raw_event):
                 event_gap = self._get_event_gap(raw_event)
                 self.last_chunk_event = raw_event
                 if event_gap >= self.gap_size:
@@ -204,8 +211,7 @@ class FileReader:
         """Read in chunk determined by either gap or day boundaries."""
         raw_event = self.logreader.read_event()
         while raw_event is not None:
-            event_type = raw_event.header.event_type
-            if event_type == Types[self.chunk_event].value:
+            if self._is_valid_chunk_event(raw_event):
                 event_gap = self._get_event_gap(raw_event)
                 event_date = self._get_event_date(raw_event)
                 self.last_chunk_event = raw_event
@@ -215,6 +221,13 @@ class FileReader:
                     break
             yield raw_event
             raw_event = self.logreader.read_event()
+
+    def _is_valid_chunk_event(self, raw_event):
+        """Return true if event is valid chunk candidate."""
+        if raw_event.is_checksum_valid:
+            event_type = raw_event.header.event_type
+            if event_type == Types[self.chunk_event].value:
+                return True
 
     def _get_event_gap(self, raw_event):
         """Return timestamp gap between current and last event."""
