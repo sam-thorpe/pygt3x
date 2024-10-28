@@ -40,7 +40,8 @@ class FileReader:
 
     def __init__(self, file_name: str, gap_size: Optional[int] = None,
                  chunk_event: Optional[str] = None,
-                 chunk_by_day: Optional[bool] = False):
+                 chunk_by_day: Optional[bool] = False,
+                 fill_ism: Optional[bool] = True):
         """Initialise."""
         self.file_name = file_name
         self.acceleration = np.empty((0, 4))
@@ -49,6 +50,7 @@ class FileReader:
         self.gap_size = gap_size
         self.chunk_event = chunk_event
         self.chunk_by_day = chunk_by_day
+        self.fill_ism = fill_ism
         self.last_chunk_event = None
         self.last_chunk_date = None
         self.chunk_dates = []
@@ -345,12 +347,15 @@ class FileReader:
                     last_idsm_ts = evt.header.timestamp
                     # Fill in missing data for dt past payloads
                     fill_start = idle_sleep_mode_started - (dt_idm - 1)
-
-                    payload = self._validate_payload(
-                        self._fill_ism(fill_start, evt.header.timestamp, last_values)
-                    )
                     idle_sleep_mode_started = None
-                    acceleration.extend(payload)
+                    if self.fill_ism:
+                        payload = self._validate_payload(
+                            self._fill_ism(
+                                fill_start,
+                                evt.header.timestamp,
+                                last_values)
+                        )
+                        acceleration.extend(payload)
                     continue
                 else:
                     logger.warning(
@@ -401,7 +406,10 @@ class FileReader:
                         time_travel_dt,
                     )
                     logger.debug("Last valid second: %s", acceleration[-1][0, 0])
-                    acceleration[-1 + int(dt)] = self._validate_payload(payload)
+
+                    # TODO: is this a bug in the original parser?
+                    # acceleration[-1 + int(dt)] = self._validate_payload(payload)
+                    acceleration.append(self._validate_payload(payload))
                 else:
                     acceleration.append(self._validate_payload(payload))
 
@@ -411,14 +419,15 @@ class FileReader:
             # the file.
             assert evt is not None
             idle_sleep_mode_ended = evt.header.timestamp
-            payload = self._validate_payload(
-                self._fill_ism(
-                    idle_sleep_mode_started - (dt_idm - 1),
-                    idle_sleep_mode_ended,
-                    last_values,
+            if self.fill_ism:
+                payload = self._validate_payload(
+                    self._fill_ism(
+                        idle_sleep_mode_started - (dt_idm - 1),
+                        idle_sleep_mode_ended,
+                        last_values,
+                    )
                 )
-            )
-            acceleration.extend(payload)
+                acceleration.extend(payload)
         if evt is not None:
             logger.debug("last ts %s", evt.header.timestamp)
 
