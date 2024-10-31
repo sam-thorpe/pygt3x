@@ -68,9 +68,13 @@ def unpack_bitpack_temperature(source: bytes):
         if sensor == 0:
             (value,) = struct.unpack("<H", source[i * 3 + 1 : (i + 1) * 3])
         else:
-            assert sensor == 1
-            (value,) = struct.unpack("<h", source[i * 3 + 1 : (i + 1) * 3])
-        data[0, sensor] = value
+            # Fix: if sensor unrecognized don't return data but don't fail
+            # assert sensor == 1
+            if sensor == 1:
+                (value,) = struct.unpack("<h", source[i * 3 + 1 : (i + 1) * 3])
+                data[0, sensor] = value
+            else:
+                logger.warning("encountered unexpected temperature payload")
     return data
 
 

@@ -451,6 +451,11 @@ class FileReader:
         # Check for and remove identical samples
         if len(acceleration) > 1:
             assert len(acceleration[0].shape) == 2
+
+            # Remove irregular size packets as they crash np.unique
+            acceleration = [x for x in acceleration if
+                            x.shape[0] == self.info.sample_rate]
+
             acceleration, counts = np.unique(acceleration, axis=0, return_counts=True)
             duplicates_removed = acceleration[counts > 1]
             if duplicates_removed.size > 0:
@@ -556,9 +561,17 @@ class FileReader:
             data = self.acceleration
         col_names = ["Timestamp", "X", "Y", "Z"]
         df = pd.DataFrame(data, columns=col_names)
+
+        # Remove any duplicated timestamp packets as ambiguous
+        # Note: true duplicates have already been removed so this is
+        # necessary only for truly ambiguous samples
+        df = df[~df.Timestamp.duplicated(keep=False)]
+
+        # Reset index, cast, and sort
         df.set_index("Timestamp", drop=True, inplace=True)
         df = df.apply(lambda x: pd.to_numeric(x, downcast="float"))  # type: ignore
         df.sort_index(kind="stable", inplace=True)
+
         return df
 
     def temperature_to_pandas(self, calibrate: bool = True):
@@ -589,16 +602,19 @@ class LogReader:
         self.source = source
 
     def read_event(self):
-        """Parse an event."""
-        header_bytes = self.source.read(8)
-        if len(header_bytes) != 8:
-            return None
-        header = Header(header_bytes)
-        payload_bytes = self.source.read(header.payload_size)
-        if len(payload_bytes) != header.payload_size:
-            return None
-        checksum = self.source.read(1)
-        if not checksum:
-            return None
-        raw_event = RawEvent(header, payload_bytes, checksum)
-        return raw_event
+        """Parse an event. Return None if event parsing fails"""
+        try:
+            header_bytes = self.source.read(8)
+            if len(header_bytes) != 8:
+                return None
+            header = Header(header_bytes)
+            payload_bytes = self.source.read(header.payload_size)
+            if len(payload_bytes) != header.payload_size:
+                return None
+            checksum = self.source.read(1)
+            if not checksum:
+                return None
+            raw_event = RawEvent(header, payload_bytes, checksum)
+            return raw_event
+        except Exception as err:
+            logger.warning(err)
