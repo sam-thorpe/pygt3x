@@ -1,10 +1,11 @@
 """Binary payload parsing."""
-
+import logging
 import struct
-
 import numpy as np
 
+
 NHANES_SCALE = 341
+logger = logging.getLogger(__name__)
 
 
 def unpack_bitpack_acceleration(source: bytes):
